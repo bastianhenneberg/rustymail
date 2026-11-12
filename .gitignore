@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+# Erzeugte Bindings — entstehen beim Bauen, gehoeren nicht ins Repo
+/bindings/swift/generated
+/bindings/kotlin/generated
+.DS_Store

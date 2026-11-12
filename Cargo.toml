@@ -1,0 +1,78 @@
+[workspace]
+members = ["crates/*", "bindings/*", "apps/desktop"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+authors = ["Peppermint Digital"]
+
+[workspace.dependencies]
+# Eigene Kisten
+mail-core = { path = "crates/mail-core" }
+mail-proto = { path = "crates/mail-proto" }
+mail-store = { path = "crates/mail-store" }
+mail-sync = { path = "crates/mail-sync" }
+mail-crypto = { path = "crates/mail-crypto" }
+
+# Grundwerkzeug
+async-trait = "0.1.92"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+thiserror = "2.0.21"
+tokio = { version = "1.54", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tracing = "0.1.44"
+uuid = { version = "1.29", features = ["v4"] }
+
+# Zugangsdaten im Tresor des Betriebssystems. Die Vorgabe-Features decken
+# alle drei Desktop-Systeme: Apple Keychain, Windows Credential Manager,
+# Secret Service ueber D-Bus.
+keyring = "4.2"
+
+# Bruecke zu den Mobilplattformen
+uniffi = "0.32.2"
+
+# Protokolle. TLS NIE ueber native-tls: rustls + platform-verifier, damit
+# iOS/Android ohne OpenSSL-Kreuzkompilat bauen und die System-Wurzelzertifikate gelten.
+async-imap = "0.12.0"
+# JMAP wird von Hand gesprochen statt ueber `jmap-client`: Dessen Vorgabe
+# zieht aws-lc-rs (derselbe Anbieter-Konflikt wie bei mail-send), und die
+# paar Methodenaufrufe, die ein Mail-Client braucht, sind ueberschaubar —
+# Mailbox/get, Email/query, Email/get, Email/set. Dafuer reicht HTTP+JSON.
+reqwest = { version = "0.13", default-features = false, features = ["json", "http2", "rustls-no-provider", "rustls-native-certs"] }
+# `rustls-no-provider` ist der Punkt: reqwest waehlt dann KEINEN eigenen
+# Krypto-Anbieter, sondern nimmt den des Prozesses — also unser `ring`.
+# Mit dem gewoehnlichen `rustls`-Feature kaeme aws-lc-rs mit, und rustls
+# haette zwei zur Auswahl.
+mail-builder = "2.0.1"
+mail-parser = "1.0.1"
+
+# HTML-Zerlegung fuer den Mailtext. html5ever statt einer schlankeren Kiste,
+# weil Mail-HTML regelmaessig kaputt ist — nicht geschlossene Marken,
+# verschachtelte Tabellen, Reste aus Word. Die Fehlerbehandlung des
+# Browser-Verfahrens ist hier der eigentliche Gegenwert.
+html5ever = "0.40"
+markup5ever_rcdom = "0.40"
+# default-features = false ist hier KEIN Feinschliff: Die Vorgabe zieht
+# `aws_lc_rs` als Krypto-Anbieter, und rustls hat dann ZWEI — `ring` von uns
+# und aws-lc-rs von hier. Die Wahl des Vorgabe-Anbieters aus den Features
+# scheitert dann zur Laufzeit, nicht beim Bauen. Der Test
+# `tls_einrichtung_entsteht` in mail-proto haelt das fest.
+mail-send = { version = "0.7.0", default-features = false, features = ["ring", "tls12", "builder", "digest-md5", "cram-md5", "logging"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.7.1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# async-imap arbeitet mit den futures-Traits, tokio mit seinen eigenen.
+# `compat` ist der Adapter dazwischen.
+tokio-util = { version = "0.7", features = ["compat"] }
+futures = "0.3"
+
+# Speicher. `bundled` uebersetzt SQLite mit — sonst haengt der Build an der
+# Fassung, die das jeweilige Betriebssystem gerade mitbringt.
+rusqlite = { version = "0.42.0", features = ["bundled"] }
+
+# Krypto. sequoia mit RustCrypto-Rueckseite, NICHT nettle: sonst schleppt
+# jeder Mobile-Build GMP/Nettle als C-Abhaengigkeit mit.
+sequoia-openpgp = { version = "2.4.2", default-features = false, features = ["crypto-rust"] }

@@ -1,0 +1,18 @@
+[package]
+name = "mail-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Die Hülle für iOS und Android — und NUR die beiden Formen, die dort
+# gebraucht werden: `staticlib` für iOS, `cdylib` für die .so im APK. Jede
+# weitere Form baut cargo mit, auch wenn sie niemand lädt, und `cargo-ndk`
+# kopiert jede .so nach jniLibs. Der Desktop linkt `mail-core` direkt und
+# kommt hier gar nicht vorbei.
+[lib]
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+mail-core = { workspace = true, features = ["ffi"] }
+uniffi = { workspace = true, features = ["cli"] }

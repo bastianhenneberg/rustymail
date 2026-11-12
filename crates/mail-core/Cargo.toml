@@ -1,0 +1,42 @@
+[package]
+name = "mail-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Nur `lib`. Die Huelle fuer iOS/Android ist `bindings/mail-ffi` und deklariert
+# dort staticlib/cdylib — cargo baut JEDE deklarierte Form, auch wenn sie
+# niemand laedt, und `cargo-ndk` kopiert jede .so ins APK.
+[lib]
+crate-type = ["lib"]
+
+[features]
+default = []
+# Reicht den ungeprueften TLS-Weg von mail-proto durch — nur fuer Tests
+# gegen einen lokalen Testserver.
+test-support = ["mail-proto/test-support"]
+# Schaltet die UniFFI-Ableitungen scharf. Der Desktop baut ohne sie.
+ffi = ["dep:uniffi"]
+
+[dependencies]
+html5ever.workspace = true
+mail-builder.workspace = true
+markup5ever_rcdom.workspace = true
+mail-parser.workspace = true
+mail-proto.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+uuid.workspace = true
+mail-store.workspace = true
+mail-sync.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uniffi = { workspace = true, features = ["tokio"], optional = true }
+
+[dev-dependencies]
+mail-core = { path = ".", features = ["test-support"] }
+tempfile = "3"
+tokio = { workspace = true, features = ["rt", "macros"] }

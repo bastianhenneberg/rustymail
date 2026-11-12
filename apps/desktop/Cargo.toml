@@ -1,0 +1,42 @@
+[package]
+name = "rustymail-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rustymail"
+path = "src/main.rs"
+
+[features]
+default = []
+# Laesst den Kern einem selbst ausgestellten Zertifikat glauben — nur fuer
+# einen Testserver auf diesem Rechner. Niemals in einem Release-Build.
+test-support = ["mail-core/test-support"]
+
+[dependencies]
+# Ohne `features = ["ffi"]`: Der Desktop linkt den Kern direkt, es gibt keine
+# Grenze zu überbrücken.
+mail-core.workspace = true
+keyring.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+# `env-filter` ist KEIN Vorgabe-Feature. Ohne es wertet `fmt::init()` die
+# Ziel-Angaben in RUST_LOG nicht aus — `RUST_LOG=mail_core=debug` bleibt
+# dann wirkungslos, und man sucht den Fehler in der Anwendung statt im
+# Protokoll.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Eigene Oberfläche, selbst gezeichnet — keine WebView, kein HTML, kein
+# Browser im Fenster. `tiny-skia` bleibt bewusst an: Es ist der
+# Software-Zeichner für Rechner ohne brauchbares Vulkan/Metal — virtuelle
+# Maschinen, Fernwartung, alte Grafikkarten. Ohne ihn startet die App dort
+# gar nicht.
+# Zeitformatierung ist Sache der OBERFLAECHE, nicht des Kerns: Der Kern
+# liefert Unix-Millisekunden, und iOS und Android formatieren mit ihren
+# eigenen, lokalisierten Bordmitteln. Eine Datumsformatierung im Kern waere
+# auf zwei von drei Plattformen die falsche.
+chrono = "0.4"
+
+iced = { version = "0.14", features = ["tokio", "tiny-skia"] }

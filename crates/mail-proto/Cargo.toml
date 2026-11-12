@@ -1,0 +1,32 @@
+[package]
+name = "mail-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Nur für Tests gegen einen lokalen Testserver mit selbst ausgestelltem
+# Zertifikat. NIE in einem Release-Build einschalten — siehe tls.rs.
+test-support = []
+
+[dependencies]
+async-imap.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+mail-builder.workspace = true
+mail-parser.workspace = true
+mail-send.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net", "io-util"] }
+tokio-rustls.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
