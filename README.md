@@ -67,6 +67,31 @@ in einem Release-Build existiert dieser Code nicht. Eine Flagge an einer
 Funktion hätte gereicht, um ihn versehentlich zu setzen; ein Feature muss
 jemand in eine `Cargo.toml` schreiben.
 
+### Gegen einen echten Server testen
+
+Ein Container zeigt nicht alles. Gegen die eigene Maschine
+(`mail.peppermint-digital.com`) laufen die Prüfungen, die GreenMail nicht
+hergibt: ein echtes Zertifikat gegen den Vertrauensspeicher des Systems,
+SPECIAL-USE-Merkmale (daran ist am 12.11.2026 ein stiller Fehler
+aufgefallen), die Aufforderungsform von XOAUTH2, der STARTTLS-Aufstieg und
+eine SMTP-Einlieferung, die wirklich zustellt.
+
+Dafür gibt es ein **eigenes Testpostfach** — nie ein benutztes, denn die
+Tests verschicken, verschieben und setzen Flaggen. Zugangsdaten in AI Brain
+unter „rustymail-test@peppermint-digital.com".
+
+```sh
+RUSTYMAIL_TEST_HOST=mail.peppermint-digital.com \
+RUSTYMAIL_TEST_USER=rustymail-test@peppermint-digital.com \
+RUSTYMAIL_TEST_PASS=… \
+  cargo test -p mail-core --test rundlauf_gegen_stalwart -- --ignored --nocapture
+
+RUSTYMAIL_IMAP_HOST=… RUSTYMAIL_IMAP_USER=… \
+  cargo test -p mail-proto --test xoauth2_gegen_stalwart -- --ignored
+RUSTYMAIL_SMTP_HOST=… \
+  cargo test -p mail-proto --test starttls_gegen_stalwart -- --ignored
+```
+
 ### JMAP gegen Stalwart testen
 
 GreenMail spricht kein JMAP. Für die zweite Erfüllung des Vertrags läuft ein
@@ -88,6 +113,8 @@ siehe `docs/jmap_testpost.py`. Über SMTP ginge es auch, verlangt aber eine
 eingerichtete Domain.
 
 ### Bindings erzeugen
+
+Die vollständige Anleitung für iOS und Android steht in [docs/MOBIL.md](docs/MOBIL.md).
 
 ```sh
 cargo build -p mail-ffi --release

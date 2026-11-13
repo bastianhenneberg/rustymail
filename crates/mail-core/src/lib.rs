@@ -30,7 +30,7 @@ pub use ansicht::*;
 pub use ereignis::{Ereignis, EreignisHoerer};
 pub use fehler::{Ergebnis, Fehler};
 pub use kern::{Einrichtung, Kern};
-pub use konto::{Kontoentwurf, Protokoll, Verbindungsdaten, Verschluesselung};
+pub use konto::{Anmeldeart, Kontoentwurf, Protokoll, Verbindungsdaten, Verschluesselung};
 pub use tresor::Tresor;
 
 #[cfg(feature = "ffi")]

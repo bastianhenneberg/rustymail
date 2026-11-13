@@ -33,6 +33,17 @@ impl Protokoll {
     }
 }
 
+/// Wie sich der Client ausweist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum Anmeldeart {
+    #[default]
+    Passwort,
+    /// SASL XOAUTH2 — das, was Gmail und Outlook verlangen. Im Tresor steht
+    /// dann ein Zugriffstoken, das nach rund einer Stunde abläuft.
+    XOauth2,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
 pub enum Verschluesselung {
@@ -60,6 +71,10 @@ pub struct Verbindungsdaten {
     /// Erweiterung angelegt wurde, hat das Feld nicht. Ohne Vorgabewert
     /// liesse sich so ein Konto nicht mehr lesen — und zwar genau einmal,
     /// beim ersten Start nach dem Update.
+    /// Passwort oder Zugriffstoken? Entscheidet, wie der Tresorinhalt
+    /// gelesen wird — und ob er ablaufen kann.
+    #[serde(default)]
+    pub anmeldeart: Anmeldeart,
     #[serde(default)]
     pub smtp_host: Option<String>,
     #[serde(default)]

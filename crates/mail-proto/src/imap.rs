@@ -23,9 +23,10 @@ use tokio_rustls::TlsConnector;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 use crate::tls::{self, Vertrauen};
+use crate::sasl::XOauth2;
 use crate::{
-    Ergebnis, Flagge, Kontobackend, Kopfzeilen, Ordner, Protokollfehler, Seite, Verschluesselung,
-    Zugang,
+    Anmeldeart, Ergebnis, Flagge, Kontobackend, Kopfzeilen, Ordner, Protokollfehler, Seite,
+    Verschluesselung, Zugang,
 };
 
 type Strom = Compat<tokio_rustls::client::TlsStream<TcpStream>>;
@@ -85,15 +86,32 @@ impl ImapBackend {
             .map_err(|fehler| Protokollfehler::NichtErreichbar(format!("TLS: {fehler}")))?;
 
         let klient = async_imap::Client::new(tls.compat());
-        let sitzung = klient
-            .login(&self.zugang.benutzer, &self.zugang.geheimnis)
-            .await
-            // Der Fehler kommt als Tupel zurück, mit dem Klienten darin, damit
-            // man es erneut versuchen könnte. Den brauchen wir nicht: Ein
-            // abgelehntes Passwort wird beim zweiten Versuch nicht richtig.
-            .map_err(|(fehler, _klient)| {
-                Protokollfehler::AnmeldungAbgelehnt(fehler.to_string())
-            })?;
+
+        // Der Fehler kommt jeweils als Tupel zurück, mit dem Klienten darin,
+        // damit man es erneut versuchen könnte. Den brauchen wir nicht: Ein
+        // abgelehntes Passwort wird beim zweiten Versuch nicht richtig, und
+        // ein abgelaufenes Token muss erneuert und nicht wiederholt werden.
+        let sitzung = match self.zugang.anmeldeart {
+            Anmeldeart::Passwort => klient
+                .login(&self.zugang.benutzer, &self.zugang.geheimnis)
+                .await
+                .map_err(|(fehler, _klient)| {
+                    Protokollfehler::AnmeldungAbgelehnt(fehler.to_string())
+                })?,
+            Anmeldeart::XOauth2 => klient
+                .authenticate(
+                    "XOAUTH2",
+                    XOauth2::neu(&self.zugang.benutzer, &self.zugang.geheimnis),
+                )
+                .await
+                .map_err(|(fehler, _klient)| {
+                    // Gmail und Outlook antworten bei abgelaufenem Token mit
+                    // derselben Ablehnung wie bei falschem — die Oberfläche
+                    // muss daraus „neu anmelden" machen, nicht „Passwort
+                    // falsch".
+                    Protokollfehler::AnmeldungAbgelehnt(format!("XOAUTH2: {fehler}"))
+                })?,
+        };
 
         tracing::debug!(host = %self.zugang.host, "IMAP angemeldet");
         Ok(sitzung)
@@ -339,12 +357,23 @@ impl Kontobackend for ImapBackend {
 
         // `new` prüft den Hostnamen und gibt deshalb ein Result zurück —
         // der Fehler ist eine Zeichenkette, keine Fehlerart.
+        let anmeldung = match self.zugang.anmeldeart {
+            Anmeldeart::Passwort => mail_send::Credentials::Plain {
+                username: self.zugang.benutzer.clone(),
+                secret: self.zugang.geheimnis.clone(),
+            },
+            Anmeldeart::XOauth2 => mail_send::Credentials::XOauth2 {
+                username: self.zugang.benutzer.clone(),
+                secret: self.zugang.geheimnis.clone(),
+            },
+        };
+
         let bauer = mail_send::SmtpClientBuilder::new(ziel.host.clone(), ziel.port)
             .map_err(|grund| {
                 Protokollfehler::NichtErreichbar(format!("Postausgang: {grund}"))
             })?
             .implicit_tls(ziel.verschluesselung == Verschluesselung::Tls)
-            .credentials((self.zugang.benutzer.clone(), self.zugang.geheimnis.clone()));
+            .credentials(anmeldung);
 
         #[cfg(feature = "test-support")]
         let bauer = if self.vertrauen == Vertrauen::Ungeprueft {
@@ -368,21 +397,84 @@ impl Kontobackend for ImapBackend {
     }
 }
 
-/// Die Rolle eines Ordners aus den SPECIAL-USE-Merkmalen — nicht aus dem
-/// Namen. Ein Ordner „Archiv" kann ein gewöhnlicher sein, und
+/// Die Rolle eines Ordners aus den SPECIAL-USE-Merkmalen (RFC 6154) — nicht
+/// aus dem Namen. Ein Ordner „Archiv" kann ein gewöhnlicher sein, und
 /// „[Gmail]/All Mail" ist keiner, obwohl er wie einer klingt.
+///
+/// **Die typisierten Varianten zuerst.** `imap-proto` übersetzt `\Sent`,
+/// `\Drafts`, `\Trash`, `\Junk`, `\Archive`, `\All` und `\Flagged` in
+/// eigene Aufzählungswerte — sie landen NICHT in `Extension`. Wer nur dort
+/// nachsieht, wirft jede Rolle stillschweigend weg und merkt es nicht:
+/// Ein Server ohne SPECIAL-USE (GreenMail etwa) verhält sich genauso.
+/// Gefunden am 12.11.2026 gegen den echten Stalwart, der alle vier schickt.
 fn rolle_aus_merkmalen(merkmale: &[NameAttribute<'_>]) -> Option<String> {
-    merkmale.iter().find_map(|merkmal| match merkmal {
-        NameAttribute::Extension(wert) => {
-            let wert = wert.trim_start_matches('\\').to_ascii_lowercase();
-            matches!(
-                wert.as_str(),
-                "sent" | "drafts" | "trash" | "junk" | "archive" | "all" | "flagged"
-            )
-            .then_some(wert)
-        }
-        _ => None,
+    merkmale.iter().find_map(|merkmal| {
+        let rolle = match merkmal {
+            NameAttribute::Sent => "sent",
+            NameAttribute::Drafts => "drafts",
+            NameAttribute::Trash => "trash",
+            NameAttribute::Junk => "junk",
+            NameAttribute::Archive => "archive",
+            NameAttribute::All => "all",
+            NameAttribute::Flagged => "flagged",
+            // Für Server, die eigene Merkmale schicken. Hier steht der
+            // Gegenschrägstrich noch davor.
+            NameAttribute::Extension(wert) => {
+                let wert = wert.trim_start_matches('\\').to_ascii_lowercase();
+                return matches!(
+                    wert.as_str(),
+                    "sent" | "drafts" | "trash" | "junk" | "archive" | "all" | "flagged"
+                )
+                .then_some(wert);
+            }
+            _ => return None,
+        };
+        Some(rolle.to_owned())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn die_typisierten_merkmale_werden_erkannt() {
+        // Genau der Fall, der still ausfiel: imap-proto liefert `\Sent` als
+        // eigene Variante, nicht als Extension.
+        assert_eq!(
+            rolle_aus_merkmalen(&[NameAttribute::Sent]).as_deref(),
+            Some("sent")
+        );
+        assert_eq!(
+            rolle_aus_merkmalen(&[NameAttribute::Trash]).as_deref(),
+            Some("trash")
+        );
+        assert_eq!(
+            rolle_aus_merkmalen(&[NameAttribute::Drafts]).as_deref(),
+            Some("drafts")
+        );
+        assert_eq!(
+            rolle_aus_merkmalen(&[NameAttribute::Junk]).as_deref(),
+            Some("junk")
+        );
+    }
+
+    #[test]
+    fn unbekannte_merkmale_ueber_die_erweiterung() {
+        assert_eq!(
+            rolle_aus_merkmalen(&[NameAttribute::Extension("\\Archive".into())]).as_deref(),
+            Some("archive")
+        );
+    }
+
+    #[test]
+    fn gewoehnliche_merkmale_ergeben_keine_rolle() {
+        assert_eq!(
+            rolle_aus_merkmalen(&[NameAttribute::NoInferiors, NameAttribute::Unmarked]),
+            None
+        );
+        assert_eq!(rolle_aus_merkmalen(&[]), None);
+    }
 }
 
 fn als_imap_flagge(flagge: &Flagge) -> String {

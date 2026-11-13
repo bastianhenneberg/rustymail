@@ -38,5 +38,8 @@ uniffi = { workspace = true, features = ["tokio"], optional = true }
 
 [dev-dependencies]
 mail-core = { path = ".", features = ["test-support"] }
+# Damit Tests ihren eigenen Bestand anlegen koennen, statt den gemeinsamen
+# zu verbrauchen.
+mail-proto = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["rt", "macros"] }

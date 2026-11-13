@@ -491,12 +491,18 @@ impl Kern {
         Ok(erledigt)
     }
 
-    pub async fn archivieren(&self, _thread_id: String) -> Ergebnis<()> {
-        Err(Fehler::offen("Verschieben — Aufgabe #9863"))
+    /// Legt ein Gespräch ins Archiv.
+    pub async fn archivieren(&self, ordner_id: String, thread_id: String) -> Ergebnis<()> {
+        self.verschieben(&ordner_id, &thread_id, "archive").await
     }
 
-    pub async fn loeschen(&self, _thread_id: String) -> Ergebnis<()> {
-        Err(Fehler::offen("Verschieben — Aufgabe #9863"))
+    /// Wirft ein Gespräch in den Papierkorb.
+    ///
+    /// Nicht löschen, sondern verschieben: `\Deleted` plus EXPUNGE wäre
+    /// endgültig, und ein versehentlicher Griff daneben wäre nicht mehr
+    /// zurückzunehmen. Den Papierkorb leert der Benutzer selbst.
+    pub async fn loeschen(&self, ordner_id: String, thread_id: String) -> Ergebnis<()> {
+        self.verschieben(&ordner_id, &thread_id, "trash").await
     }
 
     /// Bis `bis` (Unix-Millisekunden) aus dem Eingang nehmen.
@@ -664,6 +670,69 @@ impl Kern {
         Ok(())
     }
 
+    /// Verschiebt ein Gespräch in den Ordner mit dieser Rolle.
+    ///
+    /// Lokal verschwinden die Zeilen sofort — und zwar durch **Löschen**,
+    /// nicht durch Umhängen: Im Zielordner bekommt die Nachricht beim Server
+    /// eine neue Kennung, und eine selbst ausgedachte wäre beim nächsten
+    /// Abgleich eine Nachricht, die es nicht gibt. Der Abgleich des
+    /// Zielordners holt sie ordentlich wieder.
+    async fn verschieben(
+        &self,
+        ordner_id: &str,
+        thread_id: &str,
+        rolle: &str,
+    ) -> Ergebnis<()> {
+        let (konto_id, _pfad) = zerlege(ordner_id)?;
+
+        // Das Ziel steht beim Server, nicht in der Datenbank — und es muss
+        // VOR dem lokalen Löschen feststehen. Sonst sind die Zeilen weg und
+        // der Auftrag hat kein Ziel.
+        let backend = self.backend(&konto_id)?;
+        let ordner = backend.ordner().await?;
+        let ziel = ordner_mit_rolle(&ordner, rolle).ok_or_else(|| Fehler::NichtGefunden {
+            was: format!("Ordner mit der Rolle „{rolle}“"),
+        })?;
+        let ziel_id = format!("{konto_id}/{ziel}");
+
+        let betroffene = {
+            let speicher = self.speicher()?;
+            let nachrichten = speicher
+                .nachrichten_im_thread(ordner_id, thread_id)
+                .map_err(|fehler| Fehler::Speicher { grund: fehler.to_string() })?;
+
+            for nachricht in &nachrichten {
+                let auftrag = mail_sync::AusstehendeOperation::Verschieben {
+                    nachricht_id: nachricht.id.clone(),
+                    nach_ordner_id: ziel_id.clone(),
+                };
+                let nutzlast = serde_json::to_string(&auftrag).map_err(|fehler| {
+                    Fehler::Speicher { grund: format!("Auftrag nicht schreibbar: {fehler}") }
+                })?;
+                speicher
+                    .auftrag_anlegen(&konto_id, "verschieben", &nutzlast)
+                    .map_err(|fehler| Fehler::Speicher { grund: fehler.to_string() })?;
+                speicher
+                    .nachricht_vergessen(&nachricht.id)
+                    .map_err(|fehler| Fehler::Speicher { grund: fehler.to_string() })?;
+            }
+
+            nachrichten.len()
+        };
+
+        if betroffene == 0 {
+            return Err(Fehler::NichtGefunden {
+                was: format!("Gespräch {thread_id}"),
+            });
+        }
+
+        if let Err(fehler) = self.warteschlange_abarbeiten(konto_id).await {
+            tracing::debug!(%fehler, "Warteschlange noch nicht leer");
+        }
+
+        Ok(())
+    }
+
     async fn auftrag_ausfuehren(
         &self,
         backend: &Box<dyn Kontobackend>,
@@ -698,6 +767,16 @@ impl Kern {
                     };
 
                 backend.flaggen_setzen(&pfad, &kennung, setzen, loeschen).await?;
+                Ok(())
+            }
+            mail_sync::AusstehendeOperation::Verschieben {
+                nachricht_id,
+                nach_ordner_id,
+            } => {
+                let (ordner_id, kennung) = kennung_zerlegen(&nachricht_id)?;
+                let (_konto, von) = zerlege(&ordner_id)?;
+                let (_konto, nach) = zerlege(&nach_ordner_id)?;
+                backend.verschieben(&von, &kennung, &nach).await?;
                 Ok(())
             }
             andere => Err(Fehler::NochNichtGebaut {
@@ -791,6 +870,10 @@ impl Kern {
             benutzer: verbindung.benutzer.clone(),
             geheimnis,
             verschluesselung,
+            anmeldeart: match verbindung.anmeldeart {
+                crate::konto::Anmeldeart::Passwort => mail_proto::Anmeldeart::Passwort,
+                crate::konto::Anmeldeart::XOauth2 => mail_proto::Anmeldeart::XOauth2,
+            },
             senden: Some(mail_proto::Sendeziel {
                 host: verbindung
                     .smtp_host
@@ -893,48 +976,68 @@ fn jetzt_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Sucht den Gesendet-Ordner — erst über die Rolle, dann über den Namen.
+/// Die Namen, unter denen ein Ordner mit dieser Rolle sonst noch auftaucht.
 ///
-/// Die Rolle (SPECIAL-USE, RFC 6154) ist die verlässliche Antwort, aber
-/// längst nicht jeder Server gibt sie heraus; GreenMail etwa meldet gar
-/// keine Merkmale, und einige verbreitete Server auch nicht. Ohne
-/// Namens-Rückfall hätte die Kopie dort nie ein Ziel.
-///
-/// Der Rückfall ist bewusst eine feste Liste und kein „enthält sent": Ein
-/// Ordner „Rechnungen gesendet 2024" ist nicht der Postausgang.
-fn gesendet_finden(ordner: &[mail_proto::Ordner]) -> Option<String> {
-    const NAMEN: &[&str] = &[
-        "sent",
-        "gesendet",
-        "sent items",
-        "sent messages",
-        "gesendete elemente",
-        "gesendete objekte",
-        "inbox.sent",
-        "inbox.gesendet",
-    ];
+/// Nur der Rückfall. Die Rolle (SPECIAL-USE, RFC 6154) ist die verlässliche
+/// Antwort — aber längst nicht jeder Server gibt sie heraus. Die Liste ist
+/// bewusst fest und kein „enthält sent": Ein Ordner „Rechnungen gesendet
+/// 2024" ist nicht der Postausgang.
+fn namen_fuer(rolle: &str) -> &'static [&'static str] {
+    match rolle {
+        "sent" => &[
+            "sent",
+            "gesendet",
+            "sent items",
+            "sent messages",
+            "gesendete elemente",
+            "gesendete objekte",
+        ],
+        "trash" => &[
+            "trash",
+            "papierkorb",
+            "deleted items",
+            "deleted messages",
+            "geloeschte elemente",
+            "gelöschte elemente",
+        ],
+        "archive" => &["archive", "archiv", "archives"],
+        "drafts" => &["drafts", "entwürfe", "entwuerfe"],
+        "junk" => &["junk", "spam", "junk mail", "junk e-mail"],
+        _ => &[],
+    }
+}
 
+/// Sucht einen Ordner mit dieser Rolle — erst über die Rolle, dann über den
+/// Namen.
+fn ordner_mit_rolle(ordner: &[mail_proto::Ordner], rolle: &str) -> Option<String> {
     if let Some(ueber_rolle) = ordner
         .iter()
-        .find(|ordner| ordner.rolle.as_deref() == Some("sent"))
+        .find(|eintrag| eintrag.rolle.as_deref() == Some(rolle))
     {
         return Some(ueber_rolle.pfad.clone());
     }
 
+    let namen = namen_fuer(rolle);
     ordner
         .iter()
         .find(|eintrag| {
-            let name = eintrag.pfad.to_lowercase();
+            let voll = eintrag.pfad.to_lowercase();
             // Auch den letzten Pfadteil prüfen: „INBOX.Gesendet" heisst in
             // der Liste so, der Ordner aber „Gesendet".
-            let letzter = name
+            let letzter = voll
                 .rsplit(|zeichen| zeichen == '/' || zeichen == '.')
                 .next()
-                .unwrap_or(&name)
+                .unwrap_or(&voll)
                 .to_owned();
-            NAMEN.contains(&name.as_str()) || NAMEN.contains(&letzter.as_str())
+            namen.contains(&voll.as_str())
+                || namen.contains(&letzter.as_str())
+                || namen.contains(&eintrag.name.to_lowercase().as_str())
         })
         .map(|eintrag| eintrag.pfad.clone())
+}
+
+fn gesendet_finden(ordner: &[mail_proto::Ordner]) -> Option<String> {
+    ordner_mit_rolle(ordner, "sent")
 }
 
 /// Die Rolle kommt aus SPECIAL-USE, nicht aus dem Namen — mit INBOX als
@@ -1029,6 +1132,7 @@ mod tests {
                 port: 993,
                 benutzer: "post@beispiel.de".into(),
                 verschluesselung: Verschluesselung::Tls,
+                anmeldeart: crate::konto::Anmeldeart::Passwort,
                 jmap_sitzung: None,
                 smtp_host: Some("localhost".into()),
                 smtp_port: Some(3465),
@@ -1143,7 +1247,7 @@ mod tests {
 
 #[cfg(test)]
 mod gesendet_tests {
-    use super::gesendet_finden;
+    use super::{gesendet_finden, ordner_mit_rolle};
 
     fn ordner(pfad: &str, rolle: Option<&str>) -> mail_proto::Ordner {
         mail_proto::Ordner {
@@ -1190,5 +1294,40 @@ mod gesendet_tests {
     fn ohne_treffer_kein_rateversuch() {
         let liste = [ordner("INBOX", None), ordner("Entwürfe", None)];
         assert_eq!(gesendet_finden(&liste), None);
+    }
+
+    #[test]
+    fn papierkorb_und_archiv_ueber_rolle_und_name() {
+        let ueber_rolle = [ordner("INBOX", None), ordner("Irgendwas", Some("trash"))];
+        assert_eq!(
+            ordner_mit_rolle(&ueber_rolle, "trash").as_deref(),
+            Some("Irgendwas")
+        );
+
+        for (name, rolle) in [
+            ("Papierkorb", "trash"),
+            ("Deleted Items", "trash"),
+            ("Gelöschte Elemente", "trash"),
+            ("Archiv", "archive"),
+            ("Archives", "archive"),
+            ("Entwürfe", "drafts"),
+            ("Spam", "junk"),
+        ] {
+            let liste = [ordner("INBOX", None), ordner(name, None)];
+            assert_eq!(
+                ordner_mit_rolle(&liste, rolle).as_deref(),
+                Some(name),
+                "{name} nicht als {rolle} erkannt"
+            );
+        }
+    }
+
+    #[test]
+    fn ein_aehnlich_benannter_ordner_ist_kein_papierkorb() {
+        // „Papierkorb 2024" ist ein Ablageordner. Wer ihn für den
+        // Papierkorb hält, wirft Post an eine Stelle, an der sie niemand
+        // sucht — und löscht sie beim Leeren mit.
+        let liste = [ordner("INBOX", None), ordner("Papierkorb 2024", None)];
+        assert_eq!(ordner_mit_rolle(&liste, "trash"), None);
     }
 }

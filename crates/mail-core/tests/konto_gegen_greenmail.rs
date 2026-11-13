@@ -66,6 +66,7 @@ fn entwurf(geheimnis: &str) -> Kontoentwurf {
             port: 3993,
             benutzer: "test".into(),
             verschluesselung: Verschluesselung::Tls,
+            anmeldeart: mail_core::Anmeldeart::Passwort,
             jmap_sitzung: None,
             smtp_host: Some("localhost".into()),
             smtp_port: Some(3465),
@@ -533,4 +534,120 @@ async fn ohne_server_bleibt_die_aenderung_lokal_stehen_und_wartet() {
     kern.markieren(eingang.id.clone(), strang.thread_id.clone(), false)
         .await
         .expect("zurücksetzen");
+}
+
+/// Legt eine eigene Nachricht im Eingang ab und gibt ihren Betreff zurück.
+///
+/// Tests, die etwas verschieben oder löschen, dürfen nicht die gemeinsame
+/// Testpost verbrauchen — sonst sind beim nächsten Lauf andere Tests rot,
+/// und zwar ohne dass am Code etwas falsch wäre. Genau das ist am
+/// 12.11.2026 passiert.
+async fn eigene_nachricht_ablegen(kennzeichen: &str) -> String {
+    use mail_proto::{Anmeldeart, Kontobackend, Verschluesselung};
+
+    let backend = mail_proto::imap::ImapBackend::neu_ungeprueft(mail_proto::Zugang {
+        host: "localhost".to_owned(),
+        port: 3993,
+        benutzer: "test".to_owned(),
+        geheimnis: "geheim".to_owned(),
+        verschluesselung: Verschluesselung::Tls,
+        anmeldeart: Anmeldeart::Passwort,
+        senden: None,
+    });
+
+    let betreff = format!("Wegwerfnachricht {kennzeichen}");
+    let rohdaten = format!(
+        "From: wegwerf@beispiel.de\r\n\
+         To: test@localhost\r\n\
+         Subject: {betreff}\r\n\
+         Message-ID: <wegwerf-{kennzeichen}@beispiel.de>\r\n\
+         Date: Thu, 12 Nov 2026 10:00:00 +0000\r\n\
+         \r\n\
+         Diese Nachricht gehört einem Test.\r\n"
+    );
+
+    backend
+        .anhaengen("INBOX", rohdaten.as_bytes(), 1_763_000_000_000, &[])
+        .await
+        .expect("Wegwerfnachricht ablegen");
+
+    betreff
+}
+
+#[tokio::test]
+#[ignore = "braucht den GreenMail-Container"]
+async fn archivieren_nimmt_das_gespraech_aus_dem_eingang_und_legt_es_ins_archiv() {
+    let verzeichnis = tempfile::tempdir().expect("Verzeichnis");
+    let kern = kern_bauen(&verzeichnis);
+    let id = kern.konto_anlegen(entwurf("geheim")).await.expect("anlegen");
+
+    let ordner = kern.ordner(id.clone()).await.expect("Ordner");
+    let eingang = ordner
+        .iter()
+        .find(|o| o.pfad.eq_ignore_ascii_case("INBOX"))
+        .expect("INBOX");
+    let archiv = ordner
+        .iter()
+        .find(|o| o.pfad.eq_ignore_ascii_case("Archiv"))
+        .expect("Archiv-Ordner fehlt im Testserver");
+
+    kern.abgleichen(eingang.id.clone()).await.expect("Abgleich");
+    kern.abgleichen(archiv.id.clone()).await.expect("Archiv abgleichen");
+
+    let vorher_archiv = kern
+        .threads(archiv.id.clone(), None, 100)
+        .await
+        .expect("Liste")
+        .zeilen
+        .iter()
+        .map(|zeile| zeile.anzahl)
+        .sum::<u32>();
+
+    // Eigene Nachricht statt der gemeinsamen Testpost.
+    let betreff = eigene_nachricht_ablegen("archiv").await;
+    kern.abgleichen(eingang.id.clone()).await.expect("Abgleich");
+
+    let seite = kern.threads(eingang.id.clone(), None, 100).await.expect("Liste");
+    let strang = seite
+        .zeilen
+        .iter()
+        .find(|zeile| zeile.betreff == betreff)
+        .expect("die eigene Nachricht fehlt");
+    let anzahl = strang.anzahl;
+
+    kern.archivieren(eingang.id.clone(), strang.thread_id.clone())
+        .await
+        .expect("archivieren");
+
+    // 1. Lokal sofort weg — ohne auf den Server zu warten.
+    let danach = kern.threads(eingang.id.clone(), None, 50).await.expect("Liste");
+    assert!(
+        !danach.zeilen.iter().any(|zeile| zeile.thread_id == strang.thread_id),
+        "das Gespräch steht noch im Eingang"
+    );
+
+    // 2. Beim Server angekommen: Der Abgleich des Archivs findet es.
+    kern.abgleichen(archiv.id.clone()).await.expect("Archiv abgleichen");
+    let nachher_archiv = kern
+        .threads(archiv.id.clone(), None, 100)
+        .await
+        .expect("Liste")
+        .zeilen
+        .iter()
+        .map(|zeile| zeile.anzahl)
+        .sum::<u32>();
+
+    assert_eq!(
+        nachher_archiv,
+        vorher_archiv + anzahl,
+        "im Archiv ist nichts dazugekommen"
+    );
+
+    // 3. Und der Eingang hat es auch beim Server nicht mehr.
+    kern.abgleichen(eingang.id.clone()).await.expect("Abgleich");
+    let eingang_danach = kern.threads(eingang.id.clone(), None, 100).await.expect("Liste");
+    assert!(
+        !eingang_danach.zeilen.iter().any(|zeile| zeile.betreff == betreff),
+        "der Abgleich holt sie aus dem Eingang zurück — sie wurde nie verschoben"
+    );
 }

@@ -26,6 +26,7 @@ fn zugang() -> Zugang {
         benutzer: "test".to_owned(),
         geheimnis: "geheim".to_owned(),
         verschluesselung: Verschluesselung::Tls,
+        anmeldeart: mail_proto::Anmeldeart::Passwort,
         senden: Some(mail_proto::Sendeziel {
             host: "localhost".to_owned(),
             port: 3465,
@@ -324,3 +325,16 @@ async fn jede_uid_traegt_ihre_eigenen_kopfzeilen() {
         );
     }
 }
+
+
+// XOAUTH2 lässt sich hier NICHT prüfen: GreenMail verlangt die Anmeldedaten
+// in derselben Zeile (SASL-IR), `async-imap` schickt sie erst nach der
+// Aufforderung des Servers. Beide Formen sind zulässig, Gmail und Outlook
+// können beide — GreenMail nur die eine.
+//
+// Ein Test dagegen wäre zudem aus dem falschen Grund grün gewesen: GreenMails
+// Ablehnung „Missing argument" kommt als `AnmeldungAbgelehnt` an, genau wie
+// ein abgelaufenes Token. Er hätte bestanden, ohne irgendetwas zu zeigen.
+//
+// Geprüft wird XOAUTH2 deshalb in `xoauth2_gegen_stub.rs` gegen einen
+// eigenen Server, der mitschreibt, was wirklich über die Leitung geht.

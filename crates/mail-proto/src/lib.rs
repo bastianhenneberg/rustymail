@@ -13,6 +13,7 @@ use async_trait::async_trait;
 
 pub mod imap;
 pub mod jmap;
+pub mod sasl;
 pub mod tls;
 pub mod zeitpunkt;
 
@@ -25,6 +26,8 @@ pub struct Zugang {
     /// und wird hier nur durchgereicht, nie abgelegt.
     pub geheimnis: String,
     pub verschluesselung: Verschluesselung,
+    /// Wie angemeldet wird. Entscheidet, wie `geheimnis` zu lesen ist.
+    pub anmeldeart: Anmeldeart,
     /// Wohin gesendet wird. Eigene Angabe, weil Postausgang und Posteingang
     /// bei fast jedem Anbieter auf verschiedenen Rechnern liegen
     /// (`imap.example.de` gegen `smtp.example.de`) — und bei manchen auf
@@ -37,6 +40,22 @@ pub struct Sendeziel {
     pub host: String,
     pub port: u16,
     pub verschluesselung: Verschluesselung,
+}
+
+/// Wie sich der Client ausweist.
+///
+/// Der Unterschied ist nicht bloss ein anderer Befehl: Bei `Passwort` steht
+/// im Tresor ein Passwort, das jahrelang gilt. Bei `XOauth2` steht dort ein
+/// **Zugriffstoken**, das nach einer Stunde abläuft und erneuert werden muss
+/// — wer das übersieht, baut einen Client, der nach einer Stunde stumm
+/// aufhört zu arbeiten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Anmeldeart {
+    #[default]
+    Passwort,
+    /// SASL XOAUTH2. Das, was Gmail und Outlook verlangen — beide nehmen
+    /// seit Jahren kein gewöhnliches Passwort mehr an.
+    XOauth2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

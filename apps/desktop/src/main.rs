@@ -32,6 +32,17 @@ fn main() -> iced::Result {
     tracing_subscriber::fmt::init();
 
     iced::application(starten, aktualisieren, ansicht)
+        .window(iced::window::Settings {
+            // Die Fensterkennung muss zum Starter-Eintrag passen
+            // (`StartupWMClass=rustymail`). Ohne sie ordnet der Compositor
+            // das Fenster keinem Programm zu: kein Symbol in der Leiste,
+            // und ein zweiter Start öffnet scheinbar etwas Fremdes.
+            platform_specific: iced::window::settings::PlatformSpecific {
+                application_id: "rustymail".to_owned(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
         .title("RustyMail")
         .theme(|_zustand: &Postfach| Theme::Dark)
         .window_size((1280.0, 800.0))
@@ -109,6 +120,9 @@ enum Nachricht {
     VerweisGeklickt(String),
     Markieren(bool),
     FlaggeGesetzt(Result<(), String>),
+    Archivieren,
+    InDenPapierkorb,
+    Verschoben(Result<(), String>),
     Feld(Feld, String),
     Anlegen,
     Angelegt(Result<String, String>),
@@ -163,6 +177,9 @@ impl Formular {
             adresse: self.adresse.trim().to_owned(),
             protokoll: Protokoll::Imap,
             verbindung: Verbindungsdaten {
+                // Im Formular immer Passwort: XOAUTH2 braucht den
+                // Browser-Teil der Anmeldung, und den gibt es noch nicht.
+                anmeldeart: mail_core::Anmeldeart::Passwort,
                 host: self.host.trim().to_owned(),
                 // Der Benutzername ist meistens die Adresse — aber nicht
                 // immer, deshalb ein eigenes Feld mit Vorbelegung.
@@ -541,6 +558,46 @@ fn aktualisieren(zustand: &mut Postfach, nachricht: Nachricht) -> Task<Nachricht
             zustand.hinweis = Some(format!("Verweis führt zu: {ziel}"));
             Task::none()
         }
+        Nachricht::Archivieren | Nachricht::InDenPapierkorb => {
+            let ins_archiv = matches!(nachricht, Nachricht::Archivieren);
+            let (Some(kern), Some(ordner_id), Some(thread_id)) = (
+                zustand.kern.clone(),
+                zustand.gewaehlter_ordner.clone(),
+                zustand.gewaehltes_gespraech.clone(),
+            ) else {
+                return Task::none();
+            };
+
+            // Die Zeile sofort aus der Liste nehmen und zurück zur
+            // Übersicht. Der Kern hat lokal schon gelöscht; ein Gespräch,
+            // das noch offen steht, nachdem man es archiviert hat, wirkt
+            // wie ein nicht angekommener Klick.
+            zustand.threads.retain(|zeile| zeile.thread_id != thread_id);
+            zustand.gewaehltes_gespraech = None;
+            zustand.nachrichten.clear();
+            zustand.hinweis = None;
+
+            Task::perform(
+                async move {
+                    if ins_archiv {
+                        kern.archivieren(ordner_id, thread_id).await
+                    } else {
+                        kern.loeschen(ordner_id, thread_id).await
+                    }
+                    .map_err(|fehler| fehler.to_string())
+                },
+                Nachricht::Verschoben,
+            )
+        }
+        Nachricht::Verschoben(Ok(())) => Task::none(),
+        Nachricht::Verschoben(Err(grund)) => {
+            tracing::warn!(%grund, "Verschieben fehlgeschlagen");
+            // Hier wird NICHT zurückgerollt: Lokal ist es weg, der Auftrag
+            // liegt in der Warteschlange, und der nächste Abgleich bringt
+            // das Gespräch zurück, falls es wirklich nicht ging.
+            zustand.hinweis = Some(grund);
+            Task::none()
+        }
         Nachricht::FlaggeGesetzt(Ok(())) => Task::none(),
         Nachricht::FlaggeGesetzt(Err(grund)) => {
             tracing::warn!(%grund, "Flagge nicht gesetzt");
@@ -776,6 +833,8 @@ fn spalte_gespraech(zustand: &Postfach) -> Element<'_, Nachricht> {
                 text(if ist_ungelesen { "als gelesen" } else { "als ungelesen" }).size(11)
             )
             .on_press(Nachricht::GelesenSetzen(ist_ungelesen)),
+            button(text("▣ archivieren").size(11)).on_press(Nachricht::Archivieren),
+            button(text("␡ Papierkorb").size(11)).on_press(Nachricht::InDenPapierkorb),
         ]
         .spacing(6)
     ]
@@ -1130,6 +1189,7 @@ mod tests {
                         port: 3993,
                         benutzer: "test".into(),
                         verschluesselung: Verschluesselung::Tls,
+                        anmeldeart: mail_core::Anmeldeart::Passwort,
                         jmap_sitzung: None,
                         smtp_host: Some("localhost".into()),
                         smtp_port: Some(3465),

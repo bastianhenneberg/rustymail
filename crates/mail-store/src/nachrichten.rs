@@ -667,6 +667,17 @@ impl Speicher {
         Ok(())
     }
 
+    /// Entfernt eine Nachricht aus dem lokalen Bestand.
+    ///
+    /// Beim Verschieben: Im Zielordner bekommt sie eine neue Serverkennung,
+    /// und eine ausgedachte wäre beim nächsten Abgleich eine Nachricht, die
+    /// es nicht gibt. Körper und Anhänge gehen über die Fremdschlüssel mit.
+    pub fn nachricht_vergessen(&self, nachricht_id: &str) -> Ergebnis<()> {
+        self.verbindung()
+            .execute("DELETE FROM nachrichten WHERE id = ?1", [nachricht_id])?;
+        Ok(())
+    }
+
     pub fn markiert_merken(&self, nachricht_id: &str, markiert: bool) -> Ergebnis<()> {
         self.verbindung().execute(
             "UPDATE nachrichten SET markiert = ?2 WHERE id = ?1",
